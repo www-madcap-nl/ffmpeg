@@ -90,6 +90,14 @@
 const char program_name[] = "ffmpeg";
 const int program_birth_year = 2000;
 
+#define MAX_IMAGE 2000
+const int max_image = MAX_IMAGE;
+static int imp_image[MAX_IMAGE];
+static int imp_pointer = 0;
+static int frame_num = 0;
+static int scene_changes = 0;
+static char *scene_file;
+
 /* select an input stream for an output stream */
 typedef struct StreamMap {
     int disabled;           /** 1 is this mapping is disabled by a negative map */
@@ -1219,15 +1227,15 @@ static void do_video_out(AVFormatContext *s,
     if (format_video_sync) {
         double vdelta = sync_ipts - ost->sync_opts + duration;
         //FIXME set to 0.5 after we fix some dts/pts bugs like in avidec.c
-        if (vdelta < -1.1)
+        if (vdelta < 0.0)
             nb_frames = 0;
         else if (format_video_sync == 2) {
             if(vdelta<=-0.6){
                 nb_frames=0;
             }else if(vdelta>0.6)
                 ost->sync_opts= lrintf(sync_ipts);
-        }else if (vdelta > 1.1)
-            nb_frames = lrintf(vdelta);
+        }else if (vdelta > 0.0)
+            nb_frames = lrintf(vdelta+1);
 //fprintf(stderr, "vdelta:%f, ost->sync_opts:%"PRId64", ost->sync_ipts:%f nb_frames:%d\n", vdelta, ost->sync_opts, get_sync_ipts(ost), nb_frames);
         if (nb_frames == 0){
             ++nb_frames_drop;
@@ -1262,7 +1270,12 @@ static void do_video_out(AVFormatContext *s,
             pkt.pts= av_rescale_q(ost->sync_opts, enc->time_base, ost->st->time_base);
             pkt.flags |= AV_PKT_FLAG_KEY;
 
-            write_frame(s, &pkt, ost->st->codec, ost->bitstream_filters);
+            if (imp_image[0] == -1 || (imp_image[imp_pointer] == frame_num)) {
+              write_frame(s, &pkt, ost->st->codec, ost->bitstream_filters);
+               imp_pointer++;
+            }
+            frame_num++;
+
         } else {
             AVFrame big_picture;
 
@@ -1310,7 +1323,13 @@ static void do_video_out(AVFormatContext *s,
 
                 if(enc->coded_frame->key_frame)
                     pkt.flags |= AV_PKT_FLAG_KEY;
-                write_frame(s, &pkt, ost->st->codec, ost->bitstream_filters);
+
+                if (imp_image[0] == -1 || (imp_image[imp_pointer] == frame_num)) {
+                  write_frame(s, &pkt, ost->st->codec, ost->bitstream_filters);
+                   imp_pointer++;
+                }
+                frame_num++;
+
                 *frame_size = ret;
                 video_size += ret;
                 //fprintf(stderr,"\nFrame: %3d size: %5d type: %d",
@@ -1480,7 +1499,7 @@ static void print_report(OutputFile *output_files,
         snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " dup=%d drop=%d",
                 nb_frames_dup, nb_frames_drop);
 
-    av_log(NULL, is_last_report ? AV_LOG_WARNING : AV_LOG_INFO, "%s    \r", buf);
+    av_log(NULL, is_last_report ? AV_LOG_WARNING : AV_LOG_INFO, "%s    \n", buf);
 
     fflush(stderr);
 
@@ -2929,6 +2948,33 @@ static int opt_map_meta_data(OptionsContext *o, const char *opt, const char *arg
     return opt_map_metadata(o, opt, arg);
 }
 
+static int opt_scene_changes(OptionsContext *o, const char *opt, const char *arg)
+{
+    scene_changes = 1;
+    scene_file = arg;
+
+    FILE *file;
+    file = fopen(scene_file, "r"); 
+    if(file==NULL) {
+        av_log(NULL, AV_LOG_FATAL, "%s: file does not exist\n", scene_file);
+        exit_program(1);
+    }
+
+    char c[10];
+    int iter;
+
+    iter = 0;
+    while(fgets(c, 10, file)!=NULL && iter < max_image) {
+      imp_image[iter] = atoi(c);
+      iter++;
+    }
+    imp_image[iter] = -1;
+
+    fclose(file);
+
+    return 0;
+}
+
 static int opt_recording_timestamp(OptionsContext *o, const char *opt, const char *arg)
 {
     char buf[128];
@@ -4235,6 +4281,7 @@ static const OptionDef options[] = {
     { "t", HAS_ARG | OPT_TIME | OPT_OFFSET, {.off = OFFSET(recording_time)}, "record or transcode \"duration\" seconds of audio/video", "duration" },
     { "fs", HAS_ARG | OPT_INT64 | OPT_OFFSET, {.off = OFFSET(limit_filesize)}, "set the limit file size in bytes", "limit_size" }, //
     { "ss", HAS_ARG | OPT_TIME | OPT_OFFSET, {.off = OFFSET(start_time)}, "set the start time offset", "time_off" },
+    { "scene", HAS_ARG | OPT_FUNC2, {(void*)opt_scene_changes}, "scene changes file name", "scene_changes" },
     { "itsoffset", HAS_ARG | OPT_TIME | OPT_OFFSET, {.off = OFFSET(input_ts_offset)}, "set the input ts offset", "time_off" },
     { "itsscale", HAS_ARG | OPT_DOUBLE | OPT_SPEC, {.off = OFFSET(ts_scale)}, "set the input ts scale", "scale" },
     { "timestamp", HAS_ARG | OPT_FUNC2, {(void*)opt_recording_timestamp}, "set the recording timestamp ('now' to set the current time)", "time" },
@@ -4385,6 +4432,9 @@ int main(int argc, char **argv)
 #endif
 
     show_banner();
+
+    imp_image[0] = -1;
+    scene_file = "";
 
     /* parse options */
     parse_options(&o, argc, argv, options, opt_output_file);
